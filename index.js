@@ -120,12 +120,9 @@ class Player {
     this.element = this.createPlayerElement();
 
     this.moveQueue = [];
-    this._isMoving = false; // Tracks if the queue processor is active
-
-    // --- New: Flag to signal an interruption ---
+    this._isMoving = false;
     this._isInterrupted = false;
 
-    // key: "x,y", value: { cell, badgeElement }
     this.destinationBadges = new Map();
   }
 
@@ -135,41 +132,41 @@ class Player {
     return el;
   }
 
-  // --- No change to regular moveTo ---
+  // --- New: stopAllMovement ---
+  // Public method to be called by a global key listener
+  stopAllMovement() {
+    console.log("STOP command received.");
+
+    // 1. Set the interrupt flag to stop the _executeMoveTo loop
+    this._isInterrupted = true;
+
+    // 2. Clear all pending moves from the queue
+    this.moveQueue = [];
+
+    // 3. Update badges to clear all destination markers
+    this._updateDestinationBadges();
+  }
+
+  // --- (moveTo is unchanged) ---
   moveTo(cell, x, y) {
     this.moveQueue.push({ cell, x, y });
-    this._updateDestinationBadges(); // Update badges immediately
+    this._updateDestinationBadges();
     this._processMoveQueue();
   }
 
-  // --- New: moveToPriority ---
-  // Clears the queue and interrupts the current move.
+  // --- (moveToPriority is unchanged) ---
   moveToPriority(cell, x, y) {
     console.log("Priority move requested to", x, y);
-
-    // 1. Set the interrupt flag. This will stop
-    //    the *current* animation loop in _executeMoveTo.
     this._isInterrupted = true;
-
-    // 2. Clear the *pending* move queue
     this.moveQueue = [];
-
-    // 3. Add the new high-priority move as the only item
     this.moveQueue.push({ cell, x, y });
-
-    // 4. Update badges to show only this new move
     this._updateDestinationBadges();
-
-    // 5. Start the processor (if it's not already running).
-    //    The currently running processor will see the
-    //    _isInterrupted flag, stop, and its 'finally' block
-    //    will restart the processor for this new move.
     if (!this._isMoving) {
       this._processMoveQueue();
     }
   }
 
-  // (No change to _updateDestinationBadges)
+  // --- (_updateDestinationBadges is unchanged) ---
   _updateDestinationBadges() {
     for (const [key, { cell, badgeElement }] of this.destinationBadges.entries()) {
       try {
@@ -200,63 +197,45 @@ class Player {
     }
   }
 
-  // --- Updated: _processMoveQueue ---
-  // Now handles the _isInterrupted flag
+  // --- (_processMoveQueue is unchanged) ---
   async _processMoveQueue() {
     if (this._isMoving) {
-      return; // A processor is already running
+      return;
     }
     this._isMoving = true;
-
-    // Reset interrupt flag at the start of a new processing chain
     this._isInterrupted = false;
 
     try {
       while (this.moveQueue.length > 0) {
-
-        // If interrupted *between* moves, stop processing.
         if (this._isInterrupted) {
           console.log("Move queue processing stopped by interrupt.");
-          break; // Exit while loop
-        }
-
-        // Peek at the first item
-        const { cell, x, y } = this.moveQueue[0];
-
-        // Execute the move
-        await this._executeMoveTo(cell, x, y);
-
-        // Check if we were interrupted *during* that move
-        if (this._isInterrupted) {
-          console.log("Move execution was interrupted.");
-          // Don't shift. The queue was already replaced
-          // by moveToPriority. Just exit the loop.
           break;
         }
 
-        // Move completed *without* interruption.
-        // Remove it from the queue and update badges.
+        const { cell, x, y } = this.moveQueue[0];
+
+        await this._executeMoveTo(cell, x, y);
+
+        if (this._isInterrupted) {
+          console.log("Move execution was interrupted.");
+          break;
+        }
+
         this.moveQueue.shift();
         this._updateDestinationBadges();
       }
     } finally {
       this._isMoving = false;
 
-      // If we were interrupted, the flag is still true.
-      // This means a priority move is waiting.
       if (this._isInterrupted) {
-        this._isInterrupted = false; // Clear the flag
-        // Use setTimeout to start a new processor
-        // for the priority move.
+        this._isInterrupted = false;
         setTimeout(() => this._processMoveQueue(), 0);
       }
     }
   }
 
-  // --- Updated: _executeMoveTo ---
-  // Now checks the _isInterrupted flag during animation
+  // --- (_executeMoveTo is unchanged) ---
   async _executeMoveTo(cell, x, y) {
-    // ... (All setup, validation, and BFS logic is unchanged) ...
     if (!this._ship) { /*...*/ return; }
     const ship = this._ship;
     if (typeof x !== 'number' || typeof y !== 'number') { /*...*/ return; }
@@ -309,18 +288,15 @@ class Player {
     path.reverse();
     if (path.length <= 1) { /*...*/ return; }
 
-    // --- Animate along the path (with interruption check) ---
+    // Animate along the path
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const stepDelay = 140;
 
     for (let i = 1; i < path.length; i++) {
-
-      // --- New: Interruption Check ---
       if (this._isInterrupted) {
         console.warn("Move interrupted!");
-        return; // Stop this animation immediately
+        return;
       }
-      // ---
 
       const next = path[i];
 
@@ -344,6 +320,7 @@ class Player {
     console.log('Player moved to', this.x, this.y);
   }
 }
+
 document.addEventListener("DOMContentLoaded", () => {
   const shipElement = document.getElementById("ship");
   const ship = new Ship(shipElement, 20, 10);
@@ -354,5 +331,16 @@ document.addEventListener("DOMContentLoaded", () => {
   const player = new Player(0, 0); // example starting coords
   ship.initPlayer(player);
   console.log('placed player', player);
-});
 
+  // --- New: Spacebar stop listener ---
+  document.addEventListener("keydown", (e) => {
+    // We use e.code === "Space" to be precise
+    if (e.code === "Space") {
+      // Prevent spacebar from scrolling the page or clicking buttons
+      e.preventDefault();
+      console.log("Space pressed - stopping player.");
+      player.stopAllMovement(); // Call the new method
+    }
+  });
+  // ---
+});
