@@ -50,3 +50,16 @@ body {
 .table {
   background-color: white;
 }
+
+/* player styling: a small circular marker centered inside a grid cell */
+.player {
+  position: absolute;
+  width: 60%;
+  height: 60%;
+  border-radius: 50%;
+  background: red;
+  top: 20%;
+  left: 20%;
+  box-shadow: 0 0 4px rgba(0,0,0,0.3);
+  pointer-events: none; /* avoid blocking cell clicks */
+}
