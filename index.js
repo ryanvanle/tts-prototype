@@ -181,6 +181,20 @@ class Player {
       return;
     }
 
+    // Destination highlight: green border + badge showing step count
+    const steps = path.length - 1; // number of steps to reach target
+    const dest = path[path.length - 1];
+    // ensure the element can position the badge
+    if (!dest.element.style.position) dest.element.style.position = 'relative';
+    dest.element.classList.add('destination');
+    // remove any existing badge
+    const existingBadge = dest.element.querySelector('.path-badge');
+    if (existingBadge) existingBadge.remove();
+    const badge = document.createElement('div');
+    badge.classList.add('path-badge');
+    badge.innerText = String(steps);
+    dest.element.appendChild(badge);
+
     // Animate along the path (skip index 0 which is start)
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     const stepDelay = 140; // ms per step — tweakable
@@ -215,6 +229,18 @@ class Player {
 
       console.log('Player moved to', this.x, this.y);
     } finally {
+      // clean up destination highlight and badge
+      try {
+        const d = dest;
+        if (d && d.element) {
+          d.element.classList.remove('destination');
+          const b = d.element.querySelector('.path-badge');
+          if (b) b.remove();
+        }
+      } catch (e) {
+        // ignore
+      }
+
       this._isMoving = false;
     }
   }
