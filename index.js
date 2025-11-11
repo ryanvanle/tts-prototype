@@ -74,6 +74,12 @@ class Player {
     this.x = x;
     this.y = y;
     this.element = this.createPlayerElement();
+
+    this.moveQueue = [];
+    this._isMoving = false; // Tracks if the queue processor is active
+
+    // key: "x,y", value: { cell, badgeElement }
+    this.destinationBadges = new Map();
   }
 
   createPlayerElement() {
@@ -82,15 +88,93 @@ class Player {
     return el;
   }
 
-  async moveTo(cell, x, y) {
-    if (!this._ship) {
-      console.error("Player doesn't know which ship it's on!");
+  // Adds to queue and updates all badges
+  moveTo(cell, x, y) {
+    this.moveQueue.push({ cell, x, y });
+    this._updateDestinationBadges(); // Update badges immediately
+    this._processMoveQueue();
+  }
+
+  // Clears all current queue badges and redraws them
+  _updateDestinationBadges() {
+    // 1. Clear all existing badges from the DOM and the map
+    for (const [key, { cell, badgeElement }] of this.destinationBadges.entries()) {
+      try {
+        if (cell && cell.element && cell.element.contains(badgeElement)) {
+          cell.element.removeChild(badgeElement);
+        }
+        if (cell && cell.element) {
+          cell.element.classList.remove('destination');
+        }
+      } catch (e) {
+        // ignore errors
+      }
+    }
+    this.destinationBadges.clear();
+
+    // 2. Redraw all badges based on the current queue
+    for (let i = 0; i < this.moveQueue.length; i++) {
+      const { x, y } = this.moveQueue[i];
+      const key = `${x},${y}`;
+
+      // If the same coordinate is queued multiple times,
+      // only show the badge for the *first* time it appears.
+      if (this.destinationBadges.has(key)) {
+        continue;
+      }
+
+      const cell = this._ship.grid[y][x];
+
+      const badge = document.createElement('div');
+      badge.classList.add('path-badge');
+      badge.innerText = String(i + 1); // 1-indexed queue order
+
+      if (!cell.element.style.position) cell.element.style.position = 'relative';
+      cell.element.classList.add('destination');
+      cell.element.appendChild(badge);
+
+      this.destinationBadges.set(key, { cell, badgeElement: badge });
+    }
+  }
+
+  // --- Updated: _processMoveQueue ---
+  // This version fixes the disappearing badge bug
+  async _processMoveQueue() {
+    if (this._isMoving) {
       return;
     }
+    this._isMoving = true;
 
-    // Prevent concurrent moves
-    if (this._isMoving) {
-      console.warn('moveTo: already moving');
+    try {
+      // Keep processing as long as there are items in the queue
+      while (this.moveQueue.length > 0) {
+
+        // 1. PEEK at the first item, but DON'T remove it.
+        //    This item is our "currently running" move.
+        const { cell, x, y } = this.moveQueue[0];
+
+        // 2. Execute the move. While this is 'await'ing,
+        //    the moveQueue still contains this item.
+        await this._executeMoveTo(cell, x, y);
+
+        // 3. NOW that the move is 100% complete,
+        //    remove it from the front of the queue.
+        this.moveQueue.shift();
+
+        // 4. Update the badges. This will remove the "1"
+        //    that just finished and shift all others (2->1, 3->2, etc.)
+        this._updateDestinationBadges();
+      }
+    } finally {
+      this._isMoving = false;
+    }
+  }
+
+  // --- _executeMoveTo ---
+  // (This method is unchanged)
+  async _executeMoveTo(cell, x, y) {
+    if (!this._ship) {
+      console.error("Player doesn't know which ship it's on!");
       return;
     }
 
@@ -113,16 +197,14 @@ class Player {
       return;
     }
 
-    const targetCell = ship.grid[y][x];
-    // treat non-land as wall
-    if (targetCell.tileType !== 'land') {
-      console.warn('moveTo: target is not land (wall)', x, y, targetCell.tileType);
+    if (startCell.x === x && startCell.y === y) {
+      console.log('moveTo: already at target', x, y);
       return;
     }
 
-    // If we're already there, nothing to do
-    if (startCell.x === x && startCell.y === y) {
-      console.log('moveTo: already at target', x, y);
+    const targetCell = ship.grid[y][x];
+    if (targetCell.tileType !== 'land') {
+      console.warn('moveTo: target is not land (wall)', x, y, targetCell.tileType);
       return;
     }
 
@@ -152,7 +234,6 @@ class Player {
         const neighbor = ship.grid[ny][nx];
         const nkey = key(nx, ny);
         if (visited.has(nkey)) continue;
-        // Only traverse land tiles
         if (neighbor.tileType !== 'land') continue;
         visited.add(nkey);
         parents.set(nkey, key(cur.x, cur.y));
@@ -165,7 +246,7 @@ class Player {
       return;
     }
 
-    // Reconstruct path from target back to start
+    // Reconstruct path
     const path = [];
     let curKey = key(x, y);
     while (curKey) {
@@ -173,76 +254,38 @@ class Player {
       path.push(ship.grid[cy][cx]);
       curKey = parents.get(curKey);
     }
-    path.reverse(); // path[0] should be startCell, last is targetCell
+    path.reverse();
 
-    // If path is only the start cell, nothing to do
     if (path.length <= 1) {
       console.log('moveTo: already at target (path length <=1)', x, y);
       return;
     }
 
-    // Destination highlight: green border + badge showing step count
-    const steps = path.length - 1; // number of steps to reach target
-    const dest = path[path.length - 1];
-    // ensure the element can position the badge
-    if (!dest.element.style.position) dest.element.style.position = 'relative';
-    dest.element.classList.add('destination');
-    // remove any existing badge
-    const existingBadge = dest.element.querySelector('.path-badge');
-    if (existingBadge) existingBadge.remove();
-    const badge = document.createElement('div');
-    badge.classList.add('path-badge');
-    badge.innerText = String(steps);
-    dest.element.appendChild(badge);
-
-    // Animate along the path (skip index 0 which is start)
+    // Animate along the path
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-    const stepDelay = 140; // ms per step — tweakable
+    const stepDelay = 140; // ms per step
 
-    this._isMoving = true;
-    try {
-      for (let i = 1; i < path.length; i++) {
-        const next = path[i];
+    for (let i = 1; i < path.length; i++) {
+      const next = path[i];
 
-        // Remove element from current placed cell
-        const prev = this._placedCell;
-        if (prev && prev.element && this.element && prev.element.contains(this.element)) {
-          prev.element.removeChild(this.element);
-        }
-        if (prev && prev.entity === this) {
-          prev.entity = null;
-        }
-
-        // Append to next cell
-        next.element.appendChild(this.element);
-        next.entity = this;
-        this._placedCell = next;
-        this.x = next.x;
-        this.y = next.y;
-
-        // Optionally, you can add a CSS class for walking animation here
-
-        // Wait a bit before next step
-        // If it's the last step, we still await once so the final position is visible briefly
-        await sleep(stepDelay);
+      const prev = this._placedCell;
+      if (prev && prev.element && this.element && prev.element.contains(this.element)) {
+        prev.element.removeChild(this.element);
+      }
+      if (prev && prev.entity === this) {
+        prev.entity = null;
       }
 
-      console.log('Player moved to', this.x, this.y);
-    } finally {
-      // clean up destination highlight and badge
-      try {
-        const d = dest;
-        if (d && d.element) {
-          d.element.classList.remove('destination');
-          const b = d.element.querySelector('.path-badge');
-          if (b) b.remove();
-        }
-      } catch (e) {
-        // ignore
-      }
+      next.element.appendChild(this.element);
+      next.entity = this;
+      this._placedCell = next;
+      this.x = next.x;
+      this.y = next.y;
 
-      this._isMoving = false;
+      await sleep(stepDelay);
     }
+
+    console.log('Player moved to', this.x, this.y);
   }
 }
 
