@@ -4,6 +4,11 @@ class Ship {
     this.width = width;
     this.height = height;
     this.element = element;
+
+    // Timer to help distinguish single/double clicks
+    this.clickTimer = null;
+    this.clickDelay = 250; // ms
+
     this.initGrid(width, height);
   }
 
@@ -26,9 +31,42 @@ class Ship {
       for (let x = 0; x < this.width; x++) {
         const cell = this.grid[y][x];
         cell.element.classList.add(cell.tileType);
+
+        // --- Updated: Handle clicks vs. double-clicks ---
+
+        // Listen for a single click
         cell.element.addEventListener("click", () => {
-          this.interactInput(cell, x, y);
+          // When a click happens, set a timer.
+          // If the timer finishes, it was a single click.
+          // If a dblclick happens, it will cancel this timer.
+
+          // Clear any previous timer
+          if (this.clickTimer) {
+             clearTimeout(this.clickTimer);
+             this.clickTimer = null;
+          }
+
+          this.clickTimer = setTimeout(() => {
+            this.interactInput(cell, x, y, 'single');
+            this.clickTimer = null;
+          }, this.clickDelay);
         });
+
+        // Listen for a double click
+        cell.element.addEventListener("dblclick", () => {
+          // Double click detected.
+
+          // 1. Cancel the single-click timer
+          if (this.clickTimer) {
+            clearTimeout(this.clickTimer);
+            this.clickTimer = null;
+          }
+
+          // 2. Send the double-click interaction
+          this.interactInput(cell, x, y, 'double');
+        });
+        // ---
+
         this.element.appendChild(cell.element);
       }
     }
@@ -59,16 +97,22 @@ class Ship {
     this.player = player;
   }
 
-  interactInput(cell, x, y) {
+  // --- Updated: interactInput ---
+  interactInput(cell, x, y, clickType) {
     if (this.player) {
-      this.player.moveTo(cell, x, y);
+      if (clickType === 'double') {
+        // On double-click, call the new priority method
+        console.log("interacted (double) with cell at", cell, x, y);
+        this.player.moveToPriority(cell, x, y);
+      } else {
+        // On single-click, just add to queue
+        console.log("interacted (single) with cell at", cell, x, y);
+        this.player.moveTo(cell, x, y);
+      }
     }
-
-    console.log("interacted with cell at", cell, x, y);
   }
 
 }
-
 class Player {
   constructor(x, y) {
     this.x = x;
@@ -77,6 +121,9 @@ class Player {
 
     this.moveQueue = [];
     this._isMoving = false; // Tracks if the queue processor is active
+
+    // --- New: Flag to signal an interruption ---
+    this._isInterrupted = false;
 
     // key: "x,y", value: { cell, badgeElement }
     this.destinationBadges = new Map();
@@ -88,16 +135,42 @@ class Player {
     return el;
   }
 
-  // Adds to queue and updates all badges
+  // --- No change to regular moveTo ---
   moveTo(cell, x, y) {
     this.moveQueue.push({ cell, x, y });
     this._updateDestinationBadges(); // Update badges immediately
     this._processMoveQueue();
   }
 
-  // Clears all current queue badges and redraws them
+  // --- New: moveToPriority ---
+  // Clears the queue and interrupts the current move.
+  moveToPriority(cell, x, y) {
+    console.log("Priority move requested to", x, y);
+
+    // 1. Set the interrupt flag. This will stop
+    //    the *current* animation loop in _executeMoveTo.
+    this._isInterrupted = true;
+
+    // 2. Clear the *pending* move queue
+    this.moveQueue = [];
+
+    // 3. Add the new high-priority move as the only item
+    this.moveQueue.push({ cell, x, y });
+
+    // 4. Update badges to show only this new move
+    this._updateDestinationBadges();
+
+    // 5. Start the processor (if it's not already running).
+    //    The currently running processor will see the
+    //    _isInterrupted flag, stop, and its 'finally' block
+    //    will restart the processor for this new move.
+    if (!this._isMoving) {
+      this._processMoveQueue();
+    }
+  }
+
+  // (No change to _updateDestinationBadges)
   _updateDestinationBadges() {
-    // 1. Clear all existing badges from the DOM and the map
     for (const [key, { cell, badgeElement }] of this.destinationBadges.entries()) {
       try {
         if (cell && cell.element && cell.element.contains(badgeElement)) {
@@ -106,119 +179,103 @@ class Player {
         if (cell && cell.element) {
           cell.element.classList.remove('destination');
         }
-      } catch (e) {
-        // ignore errors
-      }
+      } catch (e) { /* ignore */ }
     }
     this.destinationBadges.clear();
 
-    // 2. Redraw all badges based on the current queue
     for (let i = 0; i < this.moveQueue.length; i++) {
       const { x, y } = this.moveQueue[i];
       const key = `${x},${y}`;
-
-      // If the same coordinate is queued multiple times,
-      // only show the badge for the *first* time it appears.
       if (this.destinationBadges.has(key)) {
         continue;
       }
-
       const cell = this._ship.grid[y][x];
-
       const badge = document.createElement('div');
       badge.classList.add('path-badge');
-      badge.innerText = String(i + 1); // 1-indexed queue order
-
+      badge.innerText = String(i + 1);
       if (!cell.element.style.position) cell.element.style.position = 'relative';
       cell.element.classList.add('destination');
       cell.element.appendChild(badge);
-
       this.destinationBadges.set(key, { cell, badgeElement: badge });
     }
   }
 
   // --- Updated: _processMoveQueue ---
-  // This version fixes the disappearing badge bug
+  // Now handles the _isInterrupted flag
   async _processMoveQueue() {
     if (this._isMoving) {
-      return;
+      return; // A processor is already running
     }
     this._isMoving = true;
 
+    // Reset interrupt flag at the start of a new processing chain
+    this._isInterrupted = false;
+
     try {
-      // Keep processing as long as there are items in the queue
       while (this.moveQueue.length > 0) {
 
-        // 1. PEEK at the first item, but DON'T remove it.
-        //    This item is our "currently running" move.
+        // If interrupted *between* moves, stop processing.
+        if (this._isInterrupted) {
+          console.log("Move queue processing stopped by interrupt.");
+          break; // Exit while loop
+        }
+
+        // Peek at the first item
         const { cell, x, y } = this.moveQueue[0];
 
-        // 2. Execute the move. While this is 'await'ing,
-        //    the moveQueue still contains this item.
+        // Execute the move
         await this._executeMoveTo(cell, x, y);
 
-        // 3. NOW that the move is 100% complete,
-        //    remove it from the front of the queue.
-        this.moveQueue.shift();
+        // Check if we were interrupted *during* that move
+        if (this._isInterrupted) {
+          console.log("Move execution was interrupted.");
+          // Don't shift. The queue was already replaced
+          // by moveToPriority. Just exit the loop.
+          break;
+        }
 
-        // 4. Update the badges. This will remove the "1"
-        //    that just finished and shift all others (2->1, 3->2, etc.)
+        // Move completed *without* interruption.
+        // Remove it from the queue and update badges.
+        this.moveQueue.shift();
         this._updateDestinationBadges();
       }
     } finally {
       this._isMoving = false;
+
+      // If we were interrupted, the flag is still true.
+      // This means a priority move is waiting.
+      if (this._isInterrupted) {
+        this._isInterrupted = false; // Clear the flag
+        // Use setTimeout to start a new processor
+        // for the priority move.
+        setTimeout(() => this._processMoveQueue(), 0);
+      }
     }
   }
 
-  // --- _executeMoveTo ---
-  // (This method is unchanged)
+  // --- Updated: _executeMoveTo ---
+  // Now checks the _isInterrupted flag during animation
   async _executeMoveTo(cell, x, y) {
-    if (!this._ship) {
-      console.error("Player doesn't know which ship it's on!");
-      return;
-    }
-
+    // ... (All setup, validation, and BFS logic is unchanged) ...
+    if (!this._ship) { /*...*/ return; }
     const ship = this._ship;
-
-    // validate target
-    if (typeof x !== 'number' || typeof y !== 'number') {
-      console.warn('moveTo: invalid coordinates', x, y);
-      return;
-    }
-
-    if (x < 0 || x >= ship.width || y < 0 || y >= ship.height) {
-      console.warn('moveTo: target out of bounds', x, y);
-      return;
-    }
-
+    if (typeof x !== 'number' || typeof y !== 'number') { /*...*/ return; }
+    if (x < 0 || x >= ship.width || y < 0 || y >= ship.height) { /*...*/ return; }
     const startCell = this._placedCell;
-    if (!startCell) {
-      console.warn('moveTo: player not placed on ship');
-      return;
-    }
-
-    if (startCell.x === x && startCell.y === y) {
-      console.log('moveTo: already at target', x, y);
-      return;
-    }
-
+    if (!startCell) { /*...*/ return; }
+    if (startCell.x === x && startCell.y === y) { /*...*/ return; }
     const targetCell = ship.grid[y][x];
-    if (targetCell.tileType !== 'land') {
-      console.warn('moveTo: target is not land (wall)', x, y, targetCell.tileType);
-      return;
-    }
+    if (targetCell.tileType !== 'land') { /*...*/ return; }
 
     // BFS
     const key = (cx, cy) => `${cx},${cy}`;
     const dirs = [ [0, -1], [1, 0], [0, 1], [-1, 0] ];
     const queue = [];
     const visited = new Set();
-    const parents = new Map(); // childKey -> parentKey
-
+    const parents = new Map();
     queue.push(startCell);
     visited.add(key(startCell.x, startCell.y));
     parents.set(key(startCell.x, startCell.y), null);
-
     let found = false;
     while (queue.length) {
       const cur = queue.shift();
@@ -226,7 +283,6 @@ class Player {
         found = true;
         break;
       }
-
       for (const [dx, dy] of dirs) {
         const nx = cur.x + dx;
         const ny = cur.y + dy;
@@ -240,11 +296,7 @@ class Player {
         queue.push(neighbor);
       }
     }
-
-    if (!found) {
-      console.warn('moveTo: no path to target', x, y);
-      return;
-    }
+    if (!found) { /*...*/ return; }
 
     // Reconstruct path
     const path = [];
@@ -255,17 +307,21 @@ class Player {
       curKey = parents.get(curKey);
     }
     path.reverse();
+    if (path.length <= 1) { /*...*/ return; }
 
-    if (path.length <= 1) {
-      console.log('moveTo: already at target (path length <=1)', x, y);
-      return;
-    }
-
-    // Animate along the path
+    // --- Animate along the path (with interruption check) ---
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-    const stepDelay = 140; // ms per step
+    const stepDelay = 140;
 
     for (let i = 1; i < path.length; i++) {
+
+      // --- New: Interruption Check ---
+      if (this._isInterrupted) {
+        console.warn("Move interrupted!");
+        return; // Stop this animation immediately
+      }
+      // ---
+
       const next = path[i];
 
       const prev = this._placedCell;
@@ -288,7 +344,6 @@ class Player {
     console.log('Player moved to', this.x, this.y);
   }
 }
-
 document.addEventListener("DOMContentLoaded", () => {
   const shipElement = document.getElementById("ship");
   const ship = new Ship(shipElement, 20, 10);
